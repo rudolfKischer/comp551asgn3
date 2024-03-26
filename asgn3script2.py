@@ -215,6 +215,19 @@ def build_mlp(input_shape, output_shape, width, depth, activation='relu'):
   model.add(tf.keras.layers.Dense(output_shape, activation='softmax'))
   return model
 
+def build_conv_mlp(input_shape, output_shape, width, depth, conv_depth, conv_filters, activation='relu'):
+
+  model = tf.keras.models.Sequential()
+  model.add(tf.keras.layers.Input(shape=(input_shape,)))
+  model.add(tf.keras.layers.Reshape((28, 28, 1)))
+  for i in range(conv_depth):
+    model.add(tf.keras.layers.Conv2D(conv_filters, 3, activation=activation))
+  model.add(tf.keras.layers.Flatten())
+  for i in range(depth):
+    model.add(tf.keras.layers.Dense(width, activation=activation))
+  model.add(tf.keras.layers.Dense(output_shape, activation='softmax'))
+  return model
+
 def train_mlp(model, X, Y, X_val, Y_val, epochs, batch_size, lr):
   optimizer = tf.keras.optimizers.SGD(learning_rate=lr)
   model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
@@ -1144,13 +1157,96 @@ def experiment3():
   plt.close(fig)
 
 
+def experiment4(params, epochs, batch_size, lr, X_t, Y_t, X_v, Y_v, X_e, Y_e, plot_file_path_dir=None):
+
+  # use tensor flow to train a convolutional neural network
+  # params: (width, depth, conv_layers, conv_filters)
+
+  # 3 convolutional layers
+  # 2 fully connected layers
+  # experiment with [ 32, 64, 128, 256] units for the fully connected layers
+  results = {}
+  for param in params:
+    width, depth, conv_layers, conv_filters = param
+
+    model = build_conv_mlp(X_t.shape[1], Y_t.shape[1], width, depth, conv_layers, conv_filters)
+    history = train_mlp(model, X_t, Y_t, X_v, Y_v, epochs, batch_size, lr)
+    results[param] = {}
+    results[param]['history'] = history
+    results[param]['test_loss'] = model.evaluate(X_e, Y_e)
+    results[param]['test_accuracy'] = model.evaluate(X_e, Y_e)
+    
+    # plot the histry and save it
+    histories = {
+      'loss': [
+        ('train', history.history['loss']),
+        ('val', history.history['val_loss']),
+      ],
+      'accuracy': [
+        ('train', history.history['accuracy']),
+        ('val', history.history['val_accuracy'])
+      ]
+    }
+
+    if not plot_file_path_dir:
+      plot_file_path_dir = 'exp4'
+    
+    plot_history(histories, title=f'Width: {width}, Depth: {depth}, Conv Layers: {conv_layers}, Conv Filters: {conv_filters}', plot_file_path=f'figures/{plot_file_path_dir}/width_{depth}_{width}_{conv_layers}_{conv_filters}.png')
+  
+  # plot the results where accuracy is on the y-axis and width is on the x-axis
+  # there should be a line for each depth
+  fig, ax = plt.subplots()
+
+  # pull out the all the depths
+  depths = set([depth for width, depth, conv_layers, conv_filters in params])
+
+  for depth in depths:
+    x = [width for width, depth_, conv_layers, conv_filters in params if depth_ == depth]
+    y = [results[(width, depth, conv_layers, conv_filters)]['test_accuracy'] for width in x]
+    ax.plot(x, y, label=f'Depth: {depth}')
+  ax.legend()
+  # label the x and y axis
+  ax.set_xlabel('Width')
+  ax.set_ylabel('Accuracy')
+  # save plot
+  plt.savefig(f'figures/exp4/accuracy_vs_width.png')
+  plt.close(fig)
+
+  return results
+
+def experiment4_all_models():
+
+  # 3 convolutional layers
+  # 10 filters per layer
+  # 2 fully connected layers
+  # experiment with [ 32, 64, 128, 256] units for the fully connected layers
+
+  model_params = []
+  for i in range(5, 10):
+    model_params.append((2**i, 2, 3, 10))
+  epochs = 10
+  batch_size = int(len(X_t) / 100)
+  lr = 0.02
+
+  exp4_results = experiment4(model_params, epochs, batch_size, lr, X_t, Y_t, X_v, Y_v, X_e, Y_e)
+
+  return exp4_results
+
+
+  
+
+
+
+
+
 
 
 def main():
-  exp1_results = experiment_1_all_models()
+  # exp1_results = experiment_1_all_models()
   # exp1_results_aug = experiment_1_augmented_data()
   # exp2_results = experiment2()
   # exp3_results = experiment3()
+  exp4 = experiment4_all_models()
   pass
 
 if __name__ == '__main__':
