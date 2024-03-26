@@ -103,15 +103,80 @@ def shuffle_and_split(df, split_ratio=0.8):
   test = df.iloc[split_index:]
   return train, test
 
+from albumentations import (Compose, RandomCrop, HorizontalFlip, VerticalFlip, Rotate, RandomBrightnessContrast, GaussNoise, RandomResizedCrop)
+
+import cv2
+
+def data_augmentation(X, Y, augmentations_per_image=10):
+    X_hat = X.copy()
+    Y_hat = Y.copy()
+
+    augmentations = Compose([
+        RandomCrop(28, 28),
+        HorizontalFlip(p=0.5),
+        VerticalFlip(p=0.5),
+        Rotate(limit=15, p=1.0),
+        RandomBrightnessContrast(p=0.5),
+        GaussNoise(p=0.5),
+        RandomResizedCrop(28, 28, p=0.5)
+
+    ])
+
+    augmentations_list = []
+    labels_list = []
+
+    # Wrap the outer loop with tqdm for the progress bar
+    for i in tqdm(range(X.shape[0]), desc="Augmenting Images"):
+        for j in range(augmentations_per_image):
+            image_flat = X[i]
+            label = Y[i]
+
+            image = image_flat.reshape(28, 28).astype(np.uint8)
+            augmented = augmentations(image=image)['image']
+
+            # Append the augmented image and label to the list
+            augmentations_list.append(augmented.flatten())
+            labels_list.append(label)
+    
+    # Convert the list to a numpy array
+    augmentations_list = np.array(augmentations_list)
+    labels_list = np.array(labels_list)
+
+    # Concatenate the augmented images and labels to the original dataset
+    X_hat = np.concatenate((X_hat, augmentations_list), axis=0)
+    Y_hat = np.concatenate((Y_hat, labels_list), axis=0)
+            
+
+    # Shuffle the augmented images into the dataset
+    indices = np.random.permutation(X_hat.shape[0])
+    X_hat = X_hat[indices]
+    Y_hat = Y_hat[indices]
+    return X_hat, Y_hat
+
+
+  
+
+
+
+
+
+
+
   
 
 test, train = load_mnist_sign_dataset()
 
-train, val = shuffle_and_split(train, 0.8)
+train, val = shuffle_and_split(train, 0.5)
 
 X_e, Y_e = shape(test)
 X_t, Y_t = shape(train)
 X_v, Y_v = shape(val)
+
+# augmented training data
+# X_t_plus, Y_t_plus = data_augmentation(X_t, Y_t, augmentations_per_image=10)
+
+# display first 9 images of the augmented training set
+# display_images(X_t_plus, Y_t_plus, [0,1,2,3,4,5,6,7,8], 'Augmented Train Set')
 
 
 # display first 9 images of the test set
@@ -164,23 +229,35 @@ def plot_history(histories, title='Model Loss and Accuracy', plot_file_path=None
     ax1.set_ylabel('Loss', color='tab:red')
     ax1.tick_params(axis='y', labelcolor='tab:red')
 
-    smoothing = 0.1
+    # make the mall differen shades of red
+    color_map_loss = {
+        'train': 'tab:red',
+        'val': 'lightcoral',
+        'test': 'darkred'
+
+    }
 
 
     # Plot each loss history
     for label, data in histories['loss']:
-        ax1.plot(range(1, len(data) + 1), data, label=f'{label} Loss', color='tab:red' if 'train' in label else 'lightcoral')
+        ax1.plot(range(1, len(data) + 1), data, label=f'{label} Loss', color=color_map_loss[label])
 
     # Set up the second axis for accuracy
     ax2 = ax1.twinx()  
     ax2.set_ylabel('Accuracy', color='tab:blue') 
     ax2.tick_params(axis='y', labelcolor='tab:blue')
 
+    color_map_acc = {
+        'train': 'tab:blue',
+        'val': 'lightblue',
+        'test': 'darkblue'
+    }
+
     # Plot each accuracy history
     for label, data in histories['accuracy']:
         # multiply the data by 100 to convert to percentage
         data = [x * 100 for x in data]
-        ax2.plot(range(1, len(data) + 1), data, label=f'{label} Accuracy', color='tab:blue' if 'train' in label else 'lightblue')
+        ax2.plot(range(1, len(data) + 1), data, label=f'{label} Accuracy', color=color_map_acc[label])
 
     # Add legends and title
     ax1.legend(loc='upper left')
@@ -228,7 +305,7 @@ def experiment1_benchmark(model_params, folder_name):
     histories = {
       'loss': [
         ('train', history.history['loss']),
-        ('val', history.history['val_loss'])
+        ('val', history.history['val_loss']),
       ],
       'accuracy': [
         ('train', history.history['accuracy']),
@@ -595,6 +672,23 @@ class SGDOptimizer():
 
 
 
+class SGDOptimiserWeightDecay(SGDOptimizer):
+
+  def __init__(self, lr, model, lambda_):
+    super().__init__(lr, model)
+    self.lambda_ = lambda_
+
+  def update(self, layer, lr):
+    # update the weights and biases of the layer
+    # layer: a layer object
+    # lr: the learning rate
+    # update the weights and biases of the layer
+    # return the updated weights and biases
+    layer.W -= lr * (layer.dL_dW_in.mean(axis=0).T + self.lambda_ * layer.W)
+    layer.b -= lr * layer.dL_db_in.mean(axis=0).T
+
+
+
 def accuracy(Y, Y_hat):
   # calculate the accuracy
   # Y: N X C
@@ -656,8 +750,10 @@ class Model():
     history = {
       'loss': [],
       'accuracy': [],
-      'val_loss': [0],
-      'val_accuracy': [0]
+      'val_loss': [],
+      'val_accuracy': [],
+      'test_loss': [],
+      'test_accuracy': []
     }
     batches = range(0, X_t.shape[0], batch_size)
     pbar_epochs = tqdm(range(epochs))
@@ -678,6 +774,15 @@ class Model():
         val_acc = accuracy(Y_v[val_indices], val_Y_hat)
         history['val_loss'].append(val_loss)
         history['val_accuracy'].append(val_acc)
+
+        # do the same for the test set
+        p_e = batch_size / X_e.shape[0]
+        test_indices = np.random.choice(X_e.shape[0], max(3, int(p_e * X_e.shape[0])), replace=False)
+        test_Y_hat = self.forward(X_e[test_indices])
+        test_loss = cross_entropy_loss(Y_e[test_indices], test_Y_hat)
+        test_acc = accuracy(Y_e[test_indices], test_Y_hat)
+        history['test_loss'].append(test_loss)
+        history['test_accuracy'].append(test_acc)
 
         X_batch = X_t[batch:batch+batch_size]
         Y_batch = Y_t[batch:batch+batch_size]
@@ -730,7 +835,7 @@ class FlatModel(Model):
       self.add(SoftmaxLayer())
   
 
-def experiment1(params, epochs, batch_size, lr, X_t, Y_t, X_v, Y_v, X_e, Y_e):
+def experiment1(params, epochs, batch_size, lr, X_t, Y_t, X_v, Y_v, X_e, Y_e, plot_file_path_dir=None):
   # params: list of tuples of (width, depth)
   # run the experiment
   # return the results
@@ -750,15 +855,28 @@ def experiment1(params, epochs, batch_size, lr, X_t, Y_t, X_v, Y_v, X_e, Y_e):
     histories = {
       'loss': [
         ('train', history['loss']),
-        ('val', history['val_loss'])
+        ('val', history['val_loss']),
+        ('test', history['test_loss'])
       ],
       'accuracy': [
         ('train', history['accuracy']),
-        ('val', history['val_accuracy'])
+        ('val', history['val_accuracy']),
+        ('test', history['test_accuracy'])
       ]
     }
 
-    plot_history(histories, title=f'Width: {width}, Depth: {depth}', plot_file_path=f'figures/exp1/width_{depth}_{width}.png')
+    if not plot_file_path_dir:
+      plot_file_path_dir = 'exp1'
+    
+    smoothing_size = 10
+
+    for key in histories.keys():
+      for i in range(len(histories[key])):
+        histories[key][i] = (histories[key][i][0], np.convolve(histories[key][i][1], np.ones(smoothing_size)/smoothing_size, mode='valid'))
+
+
+
+    plot_history(histories, title=f'Width: {width}, Depth: {depth}', plot_file_path=f'figures/{plot_file_path_dir}/width_{depth}_{width}.png')
   
   return results
 
@@ -796,6 +914,46 @@ def experiment_1_all_models():
   for key, value in exp1_results.items():
     print(f'Width: {key[0]}, Depth: {key[1]}, Test Loss: {value["test_loss"]}, Test Accuracy: {value["test_accuracy"]}')
   return exp1_results
+
+def experiment_1_augmented_data():
+    model_params = []
+    for i in range(1, 5):
+      for j in range(3, 10):
+        model_params.append((2**j, i))
+    epochs = 3
+    batch_size = 32
+    lr = 0.1
+
+    X_t_plus, Y_t_plus = data_augmentation(X_t, Y_t, 1)
+
+    # standardize the data
+    X_t_plus, X_v_plus, X_e_plus = standardize_data(X_t_plus, X_v, X_e)
+
+
+    # X_t_plus, Y_t_plus = X_t, Y_t
+
+    exp1_results = experiment1(model_params, epochs, batch_size, lr, X_t_plus, Y_t_plus, X_v_plus, Y_v, X_e_plus, Y_e, plot_file_path_dir='exp1_aug')
+
+    # plot the results where accuracy is on the y-axis and width is on the x-axis
+    fig, ax = plt.subplots()
+
+    depths = set([depth for width, depth in model_params])
+
+    for depth in depths:
+      x = [width for width, depth_ in model_params if depth_ == depth]
+      y = [exp1_results[(width, depth)]['test_accuracy'] for width in x]
+      ax.plot(x, y, label=f'Depth: {depth}')
+    ax.legend()
+    ax.set_xlabel('Width')
+    ax.set_ylabel('Accuracy')
+    plt.savefig(f'figures/exp1_aug/accuracy_vs_width.png')
+    plt.close(fig)
+
+    for key, value in exp1_results.items():
+      print(f'Width: {key[0]}, Depth: {key[1]}, Test Loss: {value["test_loss"]}, Test Accuracy: {value["test_accuracy"]}')
+    return exp1_results
+
+
 
 
 
@@ -837,11 +995,13 @@ def experiment2():
       histories = {
         'loss': [
           ('train', history['loss']),
-          ('val', history['val_loss'])
+          ('val', history['val_loss']),
+          ('test', history['test_loss'])
         ],
         'accuracy': [
           ('train', history['accuracy']),
-          ('val', history['val_accuracy'])
+          ('val', history['val_accuracy']),
+          ('test', history['test_accuracy'])
         ]
       }
 
@@ -871,10 +1031,127 @@ def experiment2():
   return results
 
 
+def experiment3():
+  # Regularization
+  # we want to see the effect of regularization on the model at different
+  # scales of lambda
+  # we will use a model with 2 hidden layers, and a width of 128
+  # we will use the ReLU activation function
+
+  model_params = [(250, 2)]
+  epochs = 5
+  batch_size = 32
+  lr = 0.01
+
+  n_lambda_range = [-1, -3]
+  n = 15
+  lambda_vals = np.linspace(n_lambda_range[0], n_lambda_range[1], n)
+  lambda_vals = np.power(10, lambda_vals)
+
+  print(lambda_vals)
+
+  results = {}
+  for lambda_ in lambda_vals:
+    for param in model_params:
+      width, depth = param
+      model = FlatModel(X_t.shape[1], Y_t.shape[1], width, depth)
+      model.construct_layers()
+      optimizer = SGDOptimiserWeightDecay(lr, model, lambda_)
+      model.compile(optimizer)
+      history = model.fit(X_t, Y_t, X_v, Y_v, epochs, batch_size)
+      results[(lambda_, param)] = {}
+      results[(lambda_, param)]['history'] = history
+      results[(lambda_, param)]['test_loss'] = cross_entropy_loss(Y_e, model.forward(X_e))
+      results[(lambda_, param)]['test_accuracy'] = accuracy(Y_e, model.forward(X_e))
+      # plot the histry and save it
+      histories = {
+        'loss': [
+          ('train', history['loss']),
+          ('val', history['val_loss']),
+          ('test', history['test_loss'])
+        ],
+        'accuracy': [
+          ('train', history['accuracy']),
+          ('val', history['val_accuracy']),
+          ('test', history['test_accuracy'])
+        ]
+      }
+
+      # smooth the histories
+      smoothing_window = 32
+      for key, value in histories.items():
+        for i, item in enumerate(value):
+          label, data = item
+          data = np.convolve(data, np.ones(smoothing_window)/smoothing_window, mode='valid')
+          histories[key][i] = (label, data)
+      
+
+
+      plot_history(histories, title=f'Width: {width}, Depth: {depth}, Lambda: {lambda_} lr: {lr} batch_s: {batch_size}', plot_file_path=f'figures/exp3/width_{depth}_{width}_{np.log10(lambda_)}.png')
+  
+  # plot the results as a function of the lambda on the x axis, and the accuracy on the y axis
+  fig, ax = plt.subplots()
+  # we want one plot for every set of params 
+  # each plotted on the same graph
+  # we want to see the effect of the lambda on the accuracy
+  # plot lambda on a log scale on the x axis
+  for param in model_params:
+    width, depth = param
+    x = [lambda_ for lambda_, param_ in results.keys() if param_ == param]
+    y = [results[(lambda_, param)]['test_accuracy'] for lambda_ in x]
+    ax.plot(x, y, label=f'Width: {width}, Depth: {depth}')
+  
+
+  
+  # save the plot
+  ax.legend()
+  ax.set_xscale('log')
+  ax.set_xlabel('Lambda')
+  ax.set_ylabel('Accuracy')
+  plt.savefig(f'figures/exp3/accuracy_vs_lambda.png')
+  plt.close(fig)
+
+
+  # plot the test and train accuracy for each lambda
+  # each lambda should be a different line
+  # each lambda should be a lighter shade if the lambda is bigger
+  # the train accuracy should be red
+  # the test accuracy should be blue
+  fig, ax = plt.subplots() 
+  
+  # there should be a line for each param (width and depth), but they should all be labelled
+  for key, value in results.items():
+    lambda_, param = key
+    width, depth = param
+    y_t = value['history']['accuracy']
+    y_e = value['history']['test_accuracy']
+    # smooth the histories
+    smoothing_window = 32
+    y_t = np.convolve(y_t, np.ones(smoothing_window)/smoothing_window, mode='valid')
+    y_e = np.convolve(y_e, np.ones(smoothing_window)/smoothing_window, mode='valid')
+    x = range(1, len(y_t) + 1)
+
+    ax.plot(x, y_t, label=f'Train Lambda: {lambda_}', color='red', alpha=0.5 + 0.5 * (lambda_ / max(results.keys())[0]))
+    ax.plot(x, y_e, label=f'Test Lambda: {lambda_}', color='blue', alpha=0.5 + 0.5 * (lambda_ / max(results.keys())[0]))
+
+
+
+  # make sure the legend is not on the graph so it doesnt obscure it
+  ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
+  ax.set_xlabel('Epochs')
+  ax.set_ylabel('Accuracy')
+  plt.savefig(f'figures/exp3/accuracy_vs_lambda_epochs.png')
+  plt.close(fig)
+
+
+
 
 def main():
-  # exp1_results = experiment_1_all_models()
-  exp2_results = experiment2()
+  exp1_results = experiment_1_all_models()
+  # exp1_results_aug = experiment_1_augmented_data()
+  # exp2_results = experiment2()
+  # exp3_results = experiment3()
+  pass
 
 if __name__ == '__main__':
   main()
